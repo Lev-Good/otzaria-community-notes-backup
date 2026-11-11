@@ -1,0 +1,62 @@
+name: Daily Public Backup
+
+on:
+  schedule:
+    - cron: '15 2 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  backup:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Fetch snapshot and write per-book JSON files
+        run: |
+          node -e '
+          const fs = require("node:fs");
+          const path = require("node:path");
+          (async () => {
+            const res = await fetch("https://community-notes.otzaria-notes.workers.dev/v1/backup/public", {
+              headers: { "User-Agent": "OtzariaCommunityNotes-Backup/1.0" }
+            });
+            if (!res.ok) throw new Error("HTTP " + res.status);
+            const data = await res.json();
+            fs.mkdirSync("books", { recursive: true });
+            const index = {
+              schemaVersion: 1,
+              license: data.license || "CC BY-SA 4.0",
+              generatedAt: data.generatedAt,
+              books: [],
+            };
+            for (const [bookUid, snap] of Object.entries(data.books || {})) {
+              const safe = bookUid.replace(/[^a-zA-Z0-9._-]/g, "_").slice(0, 120);
+              const fname = safe + ".json";
+              fs.writeFileSync(path.join("books", fname), JSON.stringify(snap, null, 2) + "\n");
+              index.books.push({
+                bookUid,
+                titleHint: snap.titleHint || "",
+                file: "books/" + fname,
+                count: Array.isArray(snap.records) ? snap.records.length : 0,
+              });
+            }
+            fs.writeFileSync("books/index.json", JSON.stringify(index, null, 2) + "\n");
+            console.log("Backed up books:", index.books.length);
+          })();
+          '
+      - name: Commit and push backup if changed
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add books/
+          if git diff --staged --quiet; then
+            echo "No changes to commit."
+          else
+            git commit -m "chore(backup): daily public notes snapshot ($(date -u +%F))"
+            git push
+          fi
